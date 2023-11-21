@@ -140,6 +140,23 @@ func (b *BadgerPersistence) keyAppender(wg *sync.WaitGroup) {
 	}
 }
 
+func (b *BadgerPersistence) composeKey(uuidKey *string) KeyValue {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	if uuidKey != nil {
+		return KeyValue{
+			Key:      uuid.MustParse(*uuidKey),
+			CreateAt: time.Now().UnixNano(),
+		}
+	}
+
+	return KeyValue{
+		Key:      uuid.New(),
+		CreateAt: time.Now().UnixNano(),
+	}
+}
+
 func (b *BadgerPersistence) appendKey(value KeyValue) error {
 	data, err := b.serialize(value)
 	if err != nil {
@@ -235,21 +252,4 @@ func (b *BadgerPersistence) List() (map[string]KeyValue, error) {
 	})
 
 	return keys, err
-}
-
-func (b *BadgerPersistence) composeKey(uuidKey *string) KeyValue {
-	b.mutex.Lock()
-	defer b.mutex.Unlock()
-
-	if uuidKey != nil {
-		return KeyValue{
-			Key:      uuid.MustParse(*uuidKey),
-			CreateAt: time.Now().UnixNano(),
-		}
-	}
-
-	return KeyValue{
-		Key:      uuid.New(),
-		CreateAt: time.Now().UnixNano(),
-	}
 }
