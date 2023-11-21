@@ -52,8 +52,6 @@ func NewBadgerPersistence(ctx context.Context, path string) (*BadgerPersistence,
 		return nil, err
 	}
 
-	wg := sync.WaitGroup{}
-
 	b := &BadgerPersistence{
 		db:      db,
 		keyList: make(map[string]KeyValue),
@@ -61,14 +59,24 @@ func NewBadgerPersistence(ctx context.Context, path string) (*BadgerPersistence,
 		ctx:     ctx,
 	}
 
-	go func() {
-		wg.Add(1)
-		ticker := time.NewTicker(1 * time.Second)
-		defer func() {
-			ticker.Stop()
-			wg.Done()
-		}()
+	wg := &sync.WaitGroup{}
 
+	go b.keyAppender(wg)
+	go b.monitorKeys(wg)
+
+	return b, nil
+}
+
+func (b *BadgerPersistence) monitorKeys(wg *sync.WaitGroup) {
+	wg.Add(1)
+	ticker := time.NewTicker(1 * time.Second)
+
+	defer func() {
+		ticker.Stop()
+		wg.Done()
+	}()
+
+	for {
 		//// if map is empty and db is not empty, load all keyList from db
 		//if len(b.keyList) == 0 {
 		//	keyList, err := b.List()
@@ -92,18 +100,53 @@ func NewBadgerPersistence(ctx context.Context, path string) (*BadgerPersistence,
 				return
 			}
 		}
-	}()
-
-	return b, nil
+	}
 }
 
-func (p *BadgerPersistence) appendKey(value KeyValue) error {
-	data, err := p.serialize(value)
+func (b *BadgerPersistence) keyAppender(wg *sync.WaitGroup) {
+	wg.Add(1)
+	defer wg.Done()
+
+	for {
+		select {
+		case <-b.ctx.Done():
+			return
+		default:
+			keyList, err := b.List()
+			if err != nil {
+				log.Error(err.Error())
+				continue
+			}
+
+			for _, key := range keyList {
+				b.keyList[string(key)] = KeyValue{
+					Key:      uuid.New(),
+					CreateAt: time.Now().UnixNano(),
+				}
+			}
+		}
+		//data, err := b.serialize(value)
+		//if err != nil {
+		//	return err
+		//}
+		//
+		//if err = b.db.Update(func(txn *badger.Txn) error {
+		//	return txn.Set([]byte("keyList"), data)
+		//}); err != nil {
+		//	return err
+		//}
+		//
+		//return nil
+	}
+}
+
+func (b *BadgerPersistence) appendKey(value KeyValue) error {
+	data, err := b.serialize(value)
 	if err != nil {
 		return err
 	}
 
-	if err = p.db.Update(func(txn *badger.Txn) error {
+	if err = b.db.Update(func(txn *badger.Txn) error {
 		return txn.Set([]byte("keyList"), data)
 	}); err != nil {
 		return err
@@ -112,14 +155,14 @@ func (p *BadgerPersistence) appendKey(value KeyValue) error {
 	return nil
 }
 
-func (p *BadgerPersistence) serialize(value any) ([]byte, error) {
+func (b *BadgerPersistence) serialize(value any) ([]byte, error) {
 	return json.Marshal(value)
 }
 
-func (p *BadgerPersistence) Get(key string) ([]byte, error) {
-	if k, ok := p.keyList[key]; ok {
+func (b *BadgerPersistence) Get(key string) ([]byte, error) {
+	if k, ok := b.keyList[key]; ok {
 		var value []byte
-		err := p.db.View(func(txn *badger.Txn) error {
+		err := b.db.View(func(txn *badger.Txn) error {
 			item, err := txn.Get(k.Key.NodeID())
 			if err != nil {
 				return err
@@ -135,47 +178,47 @@ func (p *BadgerPersistence) Get(key string) ([]byte, error) {
 	return nil, nil
 }
 
-func (p *BadgerPersistence) Set(value []byte) (string, error) {
-	return p.SetKey(nil, value)
+func (b *BadgerPersistence) Set(value []byte) (string, error) {
+	return b.SetKey(nil, value)
 }
 
-func (p *BadgerPersistence) SetKey(uuidKey *string, value []byte) (string, error) {
-	genKey := p.composeKey(uuidKey)
-	if err := p.db.Update(func(txn *badger.Txn) error {
+func (b *BadgerPersistence) SetKey(uuidKey *string, value []byte) (string, error) {
+	genKey := b.composeKey(uuidKey)
+	if err := b.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(genKey.Key.NodeID(), value)
 	}); err != nil {
 		return "", err
 	}
 
 	name := genKey.Key.String()
-	p.keyList[name] = genKey
+	b.keyList[name] = genKey
 
 	return name, nil
 }
 
-func (p *BadgerPersistence) Delete(key string) error {
-	if k, ok := p.keyList[key]; ok {
-		if err := p.db.Update(func(txn *badger.Txn) error {
+func (b *BadgerPersistence) Delete(key string) error {
+	if k, ok := b.keyList[key]; ok {
+		if err := b.db.Update(func(txn *badger.Txn) error {
 			return txn.Delete(k.Key.NodeID())
 		}); err != nil {
 			return err
 		}
 
-		delete(p.keyList, key)
+		delete(b.keyList, key)
 	}
 
 	return nil
 }
 
-func (p *BadgerPersistence) Close() {
-	if err := p.db.Close(); err != nil {
+func (b *BadgerPersistence) Close() {
+	if err := b.db.Close(); err != nil {
 		log.Fatalf("Error closing Badger database:", err)
 	}
 }
 
-func (p *BadgerPersistence) List() (map[string]KeyValue, error) {
+func (b *BadgerPersistence) List() (map[string]KeyValue, error) {
 	var keys = make(map[string]KeyValue)
-	err := p.db.View(func(txn *badger.Txn) error {
+	err := b.db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
 
@@ -194,9 +237,9 @@ func (p *BadgerPersistence) List() (map[string]KeyValue, error) {
 	return keys, err
 }
 
-func (p *BadgerPersistence) composeKey(uuidKey *string) KeyValue {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
+func (b *BadgerPersistence) composeKey(uuidKey *string) KeyValue {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
 
 	if uuidKey != nil {
 		return KeyValue{
