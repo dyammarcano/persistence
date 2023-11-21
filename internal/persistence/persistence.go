@@ -2,10 +2,11 @@ package persistence
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"github.com/caarlos0/log"
 	"github.com/dgraph-io/badger/v4"
-	"github.com/google/uuid"
+	"github.com/oklog/ulid/v2"
 	"sync"
 	"time"
 )
@@ -33,22 +34,31 @@ type (
 		Close() error
 
 		// List returns a list of all keyList in the key-value store.
-		List() (map[string]KeyValue, error)
+		List() (map[string][]byte, error)
 	}
 
 	// BadgerPersistence is a wrapper around BadgerDB.
 	BadgerPersistence struct {
 		ctx     context.Context
 		db      *badger.DB
-		keyList map[string]KeyValue
-		addKey  chan KeyValue
+		keyList map[string][]byte
+		addKey  chan []byte
 		mutex   *sync.Mutex
 	}
 
-	KeyValue struct {
-		Name     string
+	Key struct {
 		Key      []byte
+		TTL      int64
+		Hits     int
 		CreateAt int64
+		UpdateAt int64
+		Data     any
+	}
+
+	Value struct {
+		CreateAt int64
+		UpdateAt int64
+		Payload  []byte
 	}
 )
 
@@ -60,58 +70,60 @@ func NewBadgerPersistence(ctx context.Context, path string) (*BadgerPersistence,
 
 	b := &BadgerPersistence{
 		db:      db,
-		keyList: make(map[string]KeyValue),
-		addKey:  make(chan KeyValue, 10),
+		keyList: make(map[string][]byte),
+		addKey:  make(chan []byte, 10),
 		mutex:   &sync.Mutex{},
 		ctx:     ctx,
 	}
 
-	go b.keyAppender()
+	go b.keysMonitor()
+
+	if err = b.loadKeys(); err != nil {
+		return nil, err
+	}
 
 	return b, nil
 }
 
-//func (b *BadgerPersistence) toHexValue(key []byte) string {
-//	return fmt.Sprintf("%x", key)
-//}
-
-func (b *BadgerPersistence) keyAppender() {
+func (b *BadgerPersistence) keysMonitor() {
 	wg.Add(1)
 	defer wg.Done()
-
-	keyList, err := b.List()
-	if err != nil {
-		return
-	}
-
-	for key, value := range keyList {
-		b.keyList[key] = value
-	}
 
 	for {
 		select {
 		case key := <-b.addKey:
-			b.keyList[key.Name] = key
+			b.keyList[b.encodeKey(key)] = key
 		case <-b.ctx.Done():
 			return
 		}
 	}
 }
 
-func (b *BadgerPersistence) composeKey(uuidKey string) KeyValue {
+func (b *BadgerPersistence) encodeKey(key []byte) string {
+	return hex.EncodeToString(key)
+}
+
+func (b *BadgerPersistence) decodeKey(key string) ([]byte, error) {
+	return hex.DecodeString(key)
+}
+
+func (b *BadgerPersistence) composeKey(key string) *Key {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
-	var pk = uuid.MustParse(uuidKey)
+	pk, err := ulid.Parse(key)
+	if err != nil {
+		return nil
+	}
 
-	return KeyValue{
-		Key:      pk.NodeID(),
-		Name:     pk.String(),
+	return &Key{
+		Key:      pk.Bytes(),
 		CreateAt: time.Now().UnixNano(),
+		UpdateAt: time.Now().UnixNano(),
 	}
 }
 
-func (b *BadgerPersistence) appendKey(value KeyValue) error {
+func (b *BadgerPersistence) appendKey(value Key) error {
 	data, err := b.serialize(value)
 	if err != nil {
 		return err
@@ -130,16 +142,34 @@ func (b *BadgerPersistence) serialize(value any) ([]byte, error) {
 	return json.Marshal(value)
 }
 
-func (b *BadgerPersistence) Get(key string) ([]byte, error) {
-	if k, ok := b.keyList[key]; ok {
-		var value []byte
+func (b *BadgerPersistence) deserialize(val []byte) (*Value, error) {
+	var obj Value
+	err := json.Unmarshal(val, &obj)
+	if err != nil {
+		return nil, err
+	}
+	return &obj, nil
+}
+
+func (b *BadgerPersistence) Get(key []byte) (*Value, error) {
+	if k, ok := b.keyList[string(key)]; ok {
+		var value *Value
 		err := b.db.View(func(txn *badger.Txn) error {
-			item, err := txn.Get(k.Key)
+			item, err := txn.Get(k)
 			if err != nil {
 				return err
 			}
 
-			value, err = item.ValueCopy(nil)
+			val, err := item.ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+
+			value, err = b.deserialize(val)
+			if err != nil {
+				return err
+			}
+
 			return err
 		})
 
@@ -149,27 +179,37 @@ func (b *BadgerPersistence) Get(key string) ([]byte, error) {
 	return nil, nil
 }
 
-func (b *BadgerPersistence) Set(value []byte) (string, error) {
-	return b.SetKey(uuid.NewString(), value)
+func (b *BadgerPersistence) Set(value []byte) (*Key, error) {
+	return b.SetWithKey(ulid.Make().String(), value)
 }
 
-func (b *BadgerPersistence) SetKey(uuidKey string, value []byte) (string, error) {
-	genKey := b.composeKey(uuidKey)
-	if err := b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(genKey.Key, value)
-	}); err != nil {
-		return "", err
+func (b *BadgerPersistence) SetWithKey(key string, value []byte) (*Key, error) {
+	genKey := b.composeKey(key)
+
+	data, err := b.serialize(Value{
+		CreateAt: genKey.CreateAt,
+		UpdateAt: genKey.UpdateAt,
+		Payload:  value,
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	b.addKey <- genKey
+	if err = b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(genKey.Key, data)
+	}); err != nil {
+		return nil, err
+	}
 
-	return genKey.Name, nil
+	b.addKey <- genKey.Key
+
+	return genKey, nil
 }
 
 func (b *BadgerPersistence) Delete(key string) error {
 	if k, ok := b.keyList[key]; ok {
 		if err := b.db.Update(func(txn *badger.Txn) error {
-			return txn.Delete(k.Key)
+			return txn.Delete(k)
 		}); err != nil {
 			return err
 		}
@@ -186,27 +226,41 @@ func (b *BadgerPersistence) Close() {
 	}
 }
 
-func (b *BadgerPersistence) List() (map[string]KeyValue, error) {
-	var keys = make(map[string]KeyValue)
-	err := b.db.View(func(txn *badger.Txn) error {
+//func (b *BadgerPersistence) List() (map[string]Key, error) {
+//	var keys = make(map[string]Key)
+//	err := b.db.View(func(txn *badger.Txn) error {
+//		it := txn.NewIterator(badger.DefaultIteratorOptions)
+//		defer it.Close()
+//
+//		for it.Rewind(); it.Valid(); it.Next() {
+//			item := it.Item()
+//			pk := item.KeyCopy(nil)
+//			id, err := uuid.FromBytes(pk)
+//			if err != nil {
+//				return err
+//			}
+//			keys[id.String()] = Key{
+//				Key:      uuid.New().NodeID(),
+//				CreateAt: time.Now().UnixNano(),
+//			}
+//		}
+//
+//		return nil
+//	})
+//
+//	return keys, err
+//}
+
+func (b *BadgerPersistence) loadKeys() error {
+	return b.db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer it.Close()
 
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
-			pk := item.KeyCopy(nil)
-			id, err := uuid.FromBytes(pk)
-			if err != nil {
-				return err
-			}
-			keys[id.String()] = KeyValue{
-				Key:      uuid.New().NodeID(),
-				CreateAt: time.Now().UnixNano(),
-			}
+			b.addKey <- item.KeyCopy(nil)
 		}
 
 		return nil
 	})
-
-	return keys, err
 }
