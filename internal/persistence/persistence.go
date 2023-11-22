@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/caarlos0/log"
+	"errors"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/oklog/ulid/v2"
 	"sync"
@@ -12,8 +12,7 @@ import (
 )
 
 var (
-	KeyList = []byte("keyList")
-	wg      = &sync.WaitGroup{}
+	ErrKeyNotFound = errors.New("key not found")
 )
 
 type (
@@ -39,20 +38,20 @@ type (
 
 	// BadgerPersistence is a wrapper around BadgerDB.
 	BadgerPersistence struct {
-		ctx     context.Context
-		db      *badger.DB
-		keyList map[string][]byte
-		addKey  chan []byte
-		mutex   *sync.Mutex
+		db       *badger.DB
+		keyList  map[string][]byte
+		addKeyCh chan []byte
+		mutex    *sync.Mutex
+		wg       sync.WaitGroup
+		ctx      context.Context
 	}
 
 	Key struct {
+		String   string
 		Key      []byte
-		TTL      int64
 		Hits     int
 		CreateAt int64
 		UpdateAt int64
-		Data     any
 	}
 
 	Value struct {
@@ -62,6 +61,7 @@ type (
 	}
 )
 
+// NewBadgerPersistence returns a new BadgerPersistence.
 func NewBadgerPersistence(ctx context.Context, path string) (*BadgerPersistence, error) {
 	db, err := badger.Open(badger.DefaultOptions(path))
 	if err != nil {
@@ -69,11 +69,12 @@ func NewBadgerPersistence(ctx context.Context, path string) (*BadgerPersistence,
 	}
 
 	b := &BadgerPersistence{
-		db:      db,
-		keyList: make(map[string][]byte),
-		addKey:  make(chan []byte, 10),
-		mutex:   &sync.Mutex{},
-		ctx:     ctx,
+		db:       db,
+		keyList:  make(map[string][]byte),
+		addKeyCh: make(chan []byte, 10),
+		mutex:    &sync.Mutex{},
+		wg:       sync.WaitGroup{},
+		ctx:      ctx,
 	}
 
 	go b.keysMonitor()
@@ -81,186 +82,172 @@ func NewBadgerPersistence(ctx context.Context, path string) (*BadgerPersistence,
 	if err = b.loadKeys(); err != nil {
 		return nil, err
 	}
-
 	return b, nil
 }
 
+// keysMonitor monitors the addKeyCh channel.
 func (b *BadgerPersistence) keysMonitor() {
-	wg.Add(1)
-	defer wg.Done()
+	b.wg.Add(1)
+	defer b.wg.Done()
 
 	for {
 		select {
-		case key := <-b.addKey:
-			b.keyList[b.encodeKey(key)] = key
+		case key := <-b.addKeyCh:
+			b.addKey(key)
 		case <-b.ctx.Done():
 			return
 		}
 	}
 }
 
-func (b *BadgerPersistence) encodeKey(key []byte) string {
-	return hex.EncodeToString(key)
+// loadKeys loads all keys from the database.
+func (b *BadgerPersistence) loadKeys() error {
+	err := b.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			b.addKeyCh <- item.KeyCopy(nil)
+		}
+		it.Close()
+		return nil
+	})
+	return err
 }
 
-func (b *BadgerPersistence) decodeKey(key string) ([]byte, error) {
-	return hex.DecodeString(key)
+// addKey adds a key to the keyList.
+func (b *BadgerPersistence) addKey(key []byte) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	b.keyList[hex.EncodeToString(key)] = key
 }
 
+// getKey returns a key from the keyList.
+func (b *BadgerPersistence) getKey(key string) ([]byte, error) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	if k, ok := b.keyList[key]; ok {
+		return k, nil
+	}
+	return nil, ErrKeyNotFound
+}
+
+// composeKey generate a new key.
 func (b *BadgerPersistence) composeKey(key string) *Key {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
-	pk, err := ulid.Parse(key)
-	if err != nil {
-		return nil
-	}
-
+	id, _ := ulid.Parse(key)
 	return &Key{
-		Key:      pk.Bytes(),
+		Key:      id.Bytes(),
+		String:   hex.EncodeToString(id.Bytes()),
 		CreateAt: time.Now().UnixNano(),
 		UpdateAt: time.Now().UnixNano(),
 	}
 }
 
-func (b *BadgerPersistence) appendKey(value Key) error {
-	data, err := b.serialize(value)
-	if err != nil {
-		return err
-	}
-
-	if err = b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(KeyList, data)
-	}); err != nil {
-		return err
-	}
-
-	return nil
-}
-
+// serialize serializes a value.
 func (b *BadgerPersistence) serialize(value any) ([]byte, error) {
 	return json.Marshal(value)
 }
 
-func (b *BadgerPersistence) deserialize(val []byte) (*Value, error) {
-	var obj Value
-	err := json.Unmarshal(val, &obj)
+// deserialize deserializes a value.
+func (b *BadgerPersistence) deserialize(obj *Value, val []byte) error {
+	if err := json.Unmarshal(val, &obj); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Get returns the value for the given key.
+func (b *BadgerPersistence) Get(key string) (*Value, error) {
+	k, err := b.getKey(key)
 	if err != nil {
 		return nil, err
 	}
-	return &obj, nil
-}
 
-func (b *BadgerPersistence) Get(key []byte) (*Value, error) {
-	if k, ok := b.keyList[string(key)]; ok {
-		var value *Value
-		err := b.db.View(func(txn *badger.Txn) error {
-			item, err := txn.Get(k)
-			if err != nil {
-				return err
-			}
-
-			val, err := item.ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-
-			value, err = b.deserialize(val)
-			if err != nil {
-				return err
-			}
-
+	valObj := &Value{}
+	err = b.db.View(func(txn *badger.Txn) error {
+		item, _ := txn.Get(k)
+		val, err := item.ValueCopy(nil)
+		if err != nil {
 			return err
-		})
+		}
 
-		return value, err
+		if err = b.deserialize(valObj, val); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	return nil, nil
+	return valObj, err
 }
 
+// Set sets the value for the given key.
 func (b *BadgerPersistence) Set(value []byte) (*Key, error) {
 	return b.SetWithKey(ulid.Make().String(), value)
 }
 
+// SetWithKey sets the value for the given key.
 func (b *BadgerPersistence) SetWithKey(key string, value []byte) (*Key, error) {
-	genKey := b.composeKey(key)
+	var err error
+	k := b.composeKey(key)
 
-	data, err := b.serialize(Value{
-		CreateAt: genKey.CreateAt,
-		UpdateAt: genKey.UpdateAt,
+	val, err := b.serialize(Value{
+		CreateAt: k.CreateAt,
+		UpdateAt: k.UpdateAt,
 		Payload:  value,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	if err = b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(genKey.Key, data)
-	}); err != nil {
+	err = b.db.Update(func(txn *badger.Txn) error {
+		err = txn.Set(k.Key, val)
+		return err
+	})
+	if err != nil {
 		return nil, err
 	}
 
-	b.addKey <- genKey.Key
-
-	return genKey, nil
+	b.addKeyCh <- k.Key
+	return k, nil
 }
 
+// Delete deletes the value for the given key.
 func (b *BadgerPersistence) Delete(key string) error {
-	if k, ok := b.keyList[key]; ok {
-		if err := b.db.Update(func(txn *badger.Txn) error {
-			return txn.Delete(k)
-		}); err != nil {
-			return err
-		}
-
-		delete(b.keyList, key)
+	k, err := b.getKey(key)
+	if err != nil {
+		return err
+	}
+	err = b.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete(k)
+		return err
+	})
+	if err != nil {
+		return err
 	}
 
+	delete(b.keyList, key)
 	return nil
 }
 
-func (b *BadgerPersistence) Close() {
-	if err := b.db.Close(); err != nil {
-		log.Fatalf("Error closing Badger database:", err)
-	}
+// Close closes the database and frees up any resources.
+func (b *BadgerPersistence) Close() error {
+	return b.db.Close()
 }
 
-//func (b *BadgerPersistence) List() (map[string]Key, error) {
-//	var keys = make(map[string]Key)
-//	err := b.db.View(func(txn *badger.Txn) error {
-//		it := txn.NewIterator(badger.DefaultIteratorOptions)
-//		defer it.Close()
-//
-//		for it.Rewind(); it.Valid(); it.Next() {
-//			item := it.Item()
-//			pk := item.KeyCopy(nil)
-//			id, err := uuid.FromBytes(pk)
-//			if err != nil {
-//				return err
-//			}
-//			keys[id.String()] = Key{
-//				Key:      uuid.New().NodeID(),
-//				CreateAt: time.Now().UnixNano(),
-//			}
-//		}
-//
-//		return nil
-//	})
-//
-//	return keys, err
-//}
+// ListKeys returns a list of all keyList in the key-value store.
+func (b *BadgerPersistence) ListKeys() (map[string][]byte, error) {
+	return b.keyList, nil
+}
 
-func (b *BadgerPersistence) loadKeys() error {
-	return b.db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
-		defer it.Close()
-
-		for it.Rewind(); it.Valid(); it.Next() {
-			item := it.Item()
-			b.addKey <- item.KeyCopy(nil)
-		}
-
-		return nil
-	})
+// Len returns the number of keyList in the key-value store.
+func (b *BadgerPersistence) Len() int {
+	l := len(b.keyList)
+	return l + 1
 }
