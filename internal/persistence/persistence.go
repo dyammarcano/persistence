@@ -2,15 +2,16 @@ package persistence
 
 import (
 	"context"
-	"encoding/hex"
+	"crypto/rand"
+	"crypto/sha1"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/caarlos0/log"
 	"github.com/dgraph-io/badger/v4"
+	"github.com/dyammarcano/base58"
 	"github.com/gorilla/mux"
-	"github.com/oklog/ulid/v2"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,34 +21,17 @@ var (
 )
 
 type (
-	Persistence interface {
-		// Get returns the value for the given key.
-		Get(key []byte) ([]byte, error)
+	Callback func(key string, err error)
 
-		// Set sets the value for the given key.
-		Set(key, value []byte) error
-
-		// Update updates the value for the given key.
-		Update(key, value []byte) error
-
-		// Delete deletes the value for the given key.
-		Delete(key []byte) error
-
-		// Close closes the database and frees up any resources.
-		Close() error
-
-		// List returns a list of all keyList in the key-value store.
-		List() (map[string][]byte, error)
-	}
-
-	// BadgerPersistence is a wrapper around BadgerDB.
-	BadgerPersistence struct {
+	// CachePersistence is a wrapper around BadgerDB.
+	CachePersistence struct {
 		db       *badger.DB
 		keyList  map[string][]byte
 		addKeyCh chan []byte
 		mutex    *sync.Mutex
 		wg       sync.WaitGroup
 		ctx      context.Context
+		expires  time.Duration
 	}
 
 	Key struct {
@@ -65,20 +49,21 @@ type (
 	}
 )
 
-// NewBadgerPersistence returns a new BadgerPersistence.
-func NewBadgerPersistence(ctx context.Context, path string) (*BadgerPersistence, error) {
+// NewBadgerPersistence returns a new CachePersistence.
+func NewBadgerPersistence(ctx context.Context, path string) (*CachePersistence, error) {
 	db, err := badger.Open(badger.DefaultOptions(path))
 	if err != nil {
 		return nil, err
 	}
 
-	b := &BadgerPersistence{
+	b := &CachePersistence{
 		db:       db,
 		keyList:  make(map[string][]byte),
 		addKeyCh: make(chan []byte, 10),
 		mutex:    &sync.Mutex{},
 		wg:       sync.WaitGroup{},
 		ctx:      ctx,
+		expires:  36 * time.Hour,
 	}
 
 	go b.keysMonitor()
@@ -90,14 +75,14 @@ func NewBadgerPersistence(ctx context.Context, path string) (*BadgerPersistence,
 }
 
 // keysMonitor monitors the addKeyCh channel.
-func (b *BadgerPersistence) keysMonitor() {
+func (b *CachePersistence) keysMonitor() {
 	b.wg.Add(1)
 	defer b.wg.Done()
 
 	for {
 		select {
 		case key := <-b.addKeyCh:
-			b.addKey(key)
+			b.addKeyToKeyList(key)
 		case <-b.ctx.Done():
 			return
 		}
@@ -105,7 +90,7 @@ func (b *BadgerPersistence) keysMonitor() {
 }
 
 // loadKeys loads all keys from the database.
-func (b *BadgerPersistence) loadKeys() error {
+func (b *CachePersistence) loadKeys() error {
 	err := b.db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 
@@ -119,16 +104,16 @@ func (b *BadgerPersistence) loadKeys() error {
 	return err
 }
 
-// addKey adds a key to the keyList.
-func (b *BadgerPersistence) addKey(key []byte) {
+// addKeyToKeyList adds a key to the keyList.
+func (b *CachePersistence) addKeyToKeyList(key []byte) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
-	b.keyList[hex.EncodeToString(key)] = key
+	b.keyList[b.encodeKey(key)] = key
 }
 
-// getKey returns a key from the keyList.
-func (b *BadgerPersistence) getKey(key string) ([]byte, error) {
+// getKeyFromKeyList returns a key from the keyList.
+func (b *CachePersistence) getKeyFromKeyList(key string) ([]byte, error) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
@@ -139,42 +124,54 @@ func (b *BadgerPersistence) getKey(key string) ([]byte, error) {
 }
 
 // composeKey generate a new key.
-func (b *BadgerPersistence) composeKey(key string) *Key {
+func (b *CachePersistence) composeKey(key []byte) *Key {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
-	id, _ := ulid.Parse(key)
 	return &Key{
-		Key:      id.Bytes(),
-		String:   hex.EncodeToString(id.Bytes()),
+		Key:      key,
+		String:   b.encodeKey(key),
 		CreateAt: time.Now().UnixNano(),
-		UpdateAt: time.Now().UnixNano(),
 	}
 }
 
+// generateRandomKey generate random key with fix length of 10 bits
+func (b *CachePersistence) generateRandomKey() []byte {
+	var vk = make([]byte, 10)
+	if _, err := rand.Read(vk); err != nil {
+		return nil
+	}
+	return vk
+}
+
+// encodeKey encodes a key and return a string with 27 characters.
+func (b *CachePersistence) encodeKey(key []byte) string {
+	return strings.ToUpper(base58.StdEncoding.EncodeToString(sha1.New().Sum(key)))[0:27]
+}
+
 // serialize serializes a value.
-func (b *BadgerPersistence) serialize(value any) ([]byte, error) {
+func (b *CachePersistence) serialize(value any) ([]byte, error) {
 	return json.Marshal(value)
 }
 
 // deserialize deserializes a value.
-func (b *BadgerPersistence) deserialize(obj *Value, val []byte) error {
+func (b *CachePersistence) deserialize(obj *Value, val []byte) error {
 	if err := json.Unmarshal(val, &obj); err != nil {
 		return err
 	}
 	return nil
 }
 
-// Get returns the value for the given key.
-func (b *BadgerPersistence) Get(key string) (*Value, error) {
-	k, err := b.getKey(key)
+// GetValue returns the value for the given key.
+func (b *CachePersistence) GetValue(key string) (*Value, error) {
+	ks, err := b.getKeyFromKeyList(key)
 	if err != nil {
 		return nil, err
 	}
 
 	valObj := &Value{}
-	err = b.db.View(func(txn *badger.Txn) error {
-		item, _ := txn.Get(k)
+	if err = b.db.View(func(txn *badger.Txn) error {
+		item, _ := txn.Get(ks)
 		val, err := item.ValueCopy(nil)
 		if err != nil {
 			return err
@@ -184,64 +181,81 @@ func (b *BadgerPersistence) Get(key string) (*Value, error) {
 			return err
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, err
 	}
 	return valObj, err
 }
 
-// Set sets the value for the given key.
-func (b *BadgerPersistence) Set(value []byte) (*Key, error) {
-	return b.SetWithKey(ulid.Make().String(), value)
+// SetValue sets the value for the given key.
+func (b *CachePersistence) SetValue(value []byte) (string, error) {
+	vk := b.generateRandomKey()
+	return b.SetValueWithKey(vk, value)
 }
 
-// SetWithKey sets the value for the given key.
-func (b *BadgerPersistence) SetWithKey(key string, value []byte) (*Key, error) {
-	var err error
-	k := b.composeKey(key)
+// SetValueWithKey sets the value for the given key.
+func (b *CachePersistence) SetValueWithKey(key, value []byte) (string, error) {
+	ks := b.composeKey(key)
 
 	val, err := b.serialize(Value{
-		CreateAt: k.CreateAt,
-		UpdateAt: k.UpdateAt,
+		CreateAt: ks.CreateAt,
 		Payload:  value,
 	})
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	err = b.db.Update(func(txn *badger.Txn) error {
-		err = txn.Set(k.Key, val)
-		return err
-	})
+	if err = b.db.Update(func(txn *badger.Txn) error {
+		return txn.SetEntry(badger.NewEntry(ks.Key, val).WithTTL(b.expires).WithMeta(byte(1)))
+	}); err != nil {
+		return "", err
+	}
+	b.addKeyCh <- ks.Key
+	return ks.String, nil
+}
+
+// SetStruct sets the value for the given key.
+func (b *CachePersistence) SetStruct(value any) (string, error) {
+	data, err := json.Marshal(value)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
+	return b.SetValue(data)
+}
 
-	b.addKeyCh <- k.Key
-	return k, nil
+// SetStructAsync sets the value for the given key asynchronously.
+func (b *CachePersistence) SetStructAsync(value any, fn Callback) {
+	go fn(b.SetStruct(value))
+}
+
+// GetStruct returns the value for the given key.
+func (b *CachePersistence) GetStruct(key string, value any) error {
+	val, err := b.GetValue(key)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(val.Payload, &value)
 }
 
 // Delete deletes the value for the given key.
-func (b *BadgerPersistence) Delete(key string) error {
-	k, err := b.getKey(key)
-	if err != nil {
-		return err
-	}
-	err = b.db.Update(func(txn *badger.Txn) error {
-		err := txn.Delete(k)
-		return err
-	})
+func (b *CachePersistence) Delete(key string) error {
+	ks, err := b.getKeyFromKeyList(key)
 	if err != nil {
 		return err
 	}
 
+	if err = b.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete(ks)
+		return err
+	}); err != nil {
+		return err
+	}
 	delete(b.keyList, key)
 	return nil
 }
 
 // DeleteAll deletes all keyList in the key-value store.
-func (b *BadgerPersistence) DeleteAll() error {
+func (b *CachePersistence) DeleteAll() error {
 	if err := b.db.DropAll(); err != nil {
 		return fmt.Errorf("failed to delete all keys: %w", err)
 	}
@@ -250,26 +264,24 @@ func (b *BadgerPersistence) DeleteAll() error {
 }
 
 // Close closes the database and frees up any resources.
-func (b *BadgerPersistence) Close() error {
+func (b *CachePersistence) Close() error {
 	return b.db.Close()
 }
 
 // ListKeys returns a list of all keyList in the key-value store.
-func (b *BadgerPersistence) ListKeys() (map[string][]byte, error) {
+func (b *CachePersistence) ListKeys() (map[string][]byte, error) {
 	return b.keyList, nil
 }
 
 // Len returns the number of keyList in the key-value store.
-func (b *BadgerPersistence) Len() int {
+func (b *CachePersistence) Len() int {
 	l := len(b.keyList)
 	return l + 1
 }
 
-// StartWebInterface starts a web interface.
-func (b *BadgerPersistence) StartWebInterface(port string) {
-	r := mux.NewRouter()
-
-	r.HandleFunc("/items", func(w http.ResponseWriter, r *http.Request) {
+// RegisterPersistenceWebInterface starts a web interface.
+func (b *CachePersistence) RegisterPersistenceWebInterface(router *mux.Router) {
+	router.HandleFunc("/items", func(w http.ResponseWriter, r *http.Request) {
 		keys, err := b.ListKeys()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -278,7 +290,7 @@ func (b *BadgerPersistence) StartWebInterface(port string) {
 
 		items := make(map[string]*Value, len(keys))
 		for key := range keys {
-			val, err := b.Get(key)
+			val, err := b.GetValue(key)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -294,18 +306,18 @@ func (b *BadgerPersistence) StartWebInterface(port string) {
 		}
 	})
 
-	r.HandleFunc("/count", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/count", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]int{"count": b.Len()}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
 
-	r.HandleFunc("/item/{key}", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/item/{key}", func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
 		key := vars["key"]
 
-		val, err := b.Get(key)
+		val, err := b.GetValue(key)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -318,17 +330,11 @@ func (b *BadgerPersistence) StartWebInterface(port string) {
 		}
 	})
 
-	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		//print persistent info like number of keys, etc
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]int{"Number of keys": b.Len()}); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
-
-	log.Infof("Starting server on port %s", port)
-
-	if err := http.ListenAndServe(port, r); err != nil {
-		log.Errorf("failed to start web interface: %s", err)
-	}
 }

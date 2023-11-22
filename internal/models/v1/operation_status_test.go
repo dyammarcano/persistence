@@ -15,8 +15,6 @@ func TestOperationStatus(t *testing.T) {
 		Status:         "Failed",
 		CorrelationID:  "831e1650-001e-001b-66ab-eeb76e000000",
 		FileInfo: &FileInfo{
-			StartTime:     "2017-06-26T18:41:00.9584103Z",
-			EndTime:       "2017-06-26T18:41:00.9584103Z",
 			ETag:          "0x8D4BCC2E4835CD0",
 			ContentType:   "application/octet-stream",
 			ContentLength: 524288,

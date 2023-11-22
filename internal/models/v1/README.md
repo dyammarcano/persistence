@@ -72,17 +72,10 @@
     "hash": "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"  // extracted from v1.IncommingEvent.IncommingData.StorageData.Hash
   },
   "stages": {
-    "stage0": {
-      "startTime": "2017-06-26T18:41:00.9584103Z",                              // get from system stage 0 start time
-      "endTime": "2017-06-26T18:41:00.9584103Z",                                // get from system stage 0 end time
-      "message": "The request is invalid.",                                     // get from system stage 0 process message, if any and can be correlated to steps
-      "innerError": {
-        "date": "2017-06-26T18:41:00",                                          // get from system stage 0 process error date
-        "code": "InvalidRequest",                                               // get from system stage 0 process error code
-        "message": "File not meet the requirements."                            // get from system stage 0 process error message
-      }
-    },
+    "solicitaionNumber": 4918754,                                               // get from system solicitation number
+    "completed": "2/4",                                                         // get from system completed
     "stage1": {
+      "task": "done",                                                           // get from system stage 1 task
       "startTime": "2017-06-26T18:41:00.9584103Z",                              // get from system stage 1 start time
       "endTime": "2017-06-26T18:41:00.9584103Z",                                // get from system stage 1 end time
       "message": "The request is invalid.",                                     // get from system stage 1 process message, if any and can be correlated to steps
@@ -90,6 +83,17 @@
         "date": "2017-06-26T18:41:00",                                          // get from system stage 1 process error date
         "code": "InvalidRequest",                                               // get from system stage 1 process error code
         "message": "File not meet the requirements."                            // get from system stage 1 process error message
+      }
+    },
+    "stage2": {
+      "task": "processing",                                                     // get from system stage 2 task
+      "startTime": "2017-06-26T18:41:00.9584103Z",                              // get from system stage 2 start time
+      "endTime": "2017-06-26T18:41:00.9584103Z",                                // get from system stage 2 end time
+      "message": "The request is invalid.",                                     // get from system stage 2 process message, if any and can be correlated to steps
+      "innerError": {
+        "date": "2017-06-26T18:41:00",                                          // get from system stage 2 process error date
+        "code": "InvalidRequest",                                               // get from system stage 2 process error code
+        "message": "File not meet the requirements."                            // get from system stage 2 process error message
       }
     }
   }

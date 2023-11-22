@@ -2,7 +2,15 @@ package v1
 
 import "encoding/json"
 
+const (
+	Done       ProcessString = "done"
+	Failed     ProcessString = "failed"
+	Started    ProcessString = "started"
+	Processing ProcessString = "processing"
+)
+
 type (
+	ProcessString   string
 	OperationStatus struct {
 		CreateAt       int64     `json:"createAt,omitempty"`
 		UpdateAt       int64     `json:"updateAt,omitempty"`
@@ -23,22 +31,25 @@ type (
 	}
 
 	Stages struct {
-		Stage0 *Stage `json:"stage0,omitempty"`
-		Stage1 *Stage `json:"stage1,omitempty"`
-		Stage2 *Stage `json:"stage2,omitempty"`
-		Stage3 *Stage `json:"stage3,omitempty"`
-		Stage4 *Stage `json:"stage4,omitempty"`
-		Stage5 *Stage `json:"stage5,omitempty"`
-		Stage6 *Stage `json:"stage6,omitempty"`
-		Stage7 *Stage `json:"stage7,omitempty"`
+		SolicitationNumber int    `json:"solicitaionNumber,omitempty"`
+		Completed          string `json:"completed,omitempty"`
+		Stage0             *Stage `json:"stage0,omitempty"`
+		Stage1             *Stage `json:"stage1,omitempty"`
+		Stage2             *Stage `json:"stage2,omitempty"`
+		Stage3             *Stage `json:"stage3,omitempty"`
+		Stage4             *Stage `json:"stage4,omitempty"`
+		Stage5             *Stage `json:"stage5,omitempty"`
+		Stage6             *Stage `json:"stage6,omitempty"`
+		Stage7             *Stage `json:"stage7,omitempty"`
 	}
 
 	Stage struct {
-		StartTime  string      `json:"startTime,omitempty"`
-		EndTime    string      `json:"endTime,omitempty"`
-		EventTime  string      `json:"eventTime,omitempty"`
-		Message    string      `json:"message,omitempty"`
-		InnerError *InnerError `json:"innerError,omitempty"`
+		Task       ProcessString `json:"task,omitempty"`
+		StartTime  string        `json:"startTime,omitempty"`
+		EndTime    string        `json:"endTime,omitempty"`
+		EventTime  string        `json:"eventTime,omitempty"`
+		Message    string        `json:"message,omitempty"`
+		InnerError *InnerError   `json:"innerError,omitempty"`
 	}
 
 	InnerError struct {

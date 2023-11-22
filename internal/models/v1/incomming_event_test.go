@@ -71,6 +71,7 @@ func TestEncryptPayloadData(t *testing.T) {
 				EventType:       "Microsoft.Storage.BlobCreated",
 				EventTime:       "2017-06-26T18:41:00.9584103Z",
 				ID:              "831e1650-001e-001b-66ab-eeb76e069631",
+				Hash:            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
 				ClientRequestId: "6d79dbfb-0e37-4fc4-981f-442c9ca65760",
 				RequestId:       "831e1650-001e-001b-66ab-eeb76e000000",
 				ETag:            "0x8D4BCC2E4835CD0",
@@ -83,7 +84,6 @@ func TestEncryptPayloadData(t *testing.T) {
 				},
 			},
 			Metadata: &Metadata{
-				Hash:       "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
 				FilePath:   "oc2d2817345i200097container/ArqsAguardando/oc2d2817345i20002296blob.txt",
 				OutputPath: "oc2d2817345i200097container/ArqsRetorno/oc2d2817345i20002296blob.txt",
 				MimeType:   "application/octet-stream",
@@ -135,6 +135,7 @@ func TestRequestMessage(t *testing.T) {
 				EventTime:       "2017-06-26T18:41:00.9584103Z",
 				ID:              "831e1650-001e-001b-66ab-eeb76e069631",
 				ClientRequestId: "6d79dbfb-0e37-4fc4-981f-442c9ca65760",
+				Hash:            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
 				RequestId:       "831e1650-001e-001b-66ab-eeb76e000000",
 				ETag:            "0x8D4BCC2E4835CD0",
 				ContentType:     "application/octet-stream",
@@ -146,7 +147,6 @@ func TestRequestMessage(t *testing.T) {
 				},
 			},
 			Metadata: &Metadata{
-				Hash:       "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
 				FilePath:   "oc2d2817345i200097container/ArqsAguardando/oc2d2817345i20002296blob.txt",
 				OutputPath: "oc2d2817345i200097container/ArqsRetorno/oc2d2817345i20002296blob.txt",
 				MimeType:   "application/octet-stream",
