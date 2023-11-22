@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/caarlos0/log"
 	"github.com/dgraph-io/badger/v4"
+	"github.com/gorilla/mux"
 	"github.com/oklog/ulid/v2"
 	"net/http"
 	"sync"
@@ -265,7 +267,9 @@ func (b *BadgerPersistence) Len() int {
 
 // StartWebInterface starts a web interface.
 func (b *BadgerPersistence) StartWebInterface(port string) {
-	http.HandleFunc("/items", func(w http.ResponseWriter, r *http.Request) {
+	r := mux.NewRouter()
+
+	r.HandleFunc("/items", func(w http.ResponseWriter, r *http.Request) {
 		keys, err := b.ListKeys()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -283,31 +287,48 @@ func (b *BadgerPersistence) StartWebInterface(port string) {
 			items[key] = val
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		if err = json.NewEncoder(w).Encode(items); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	})
 
-	http.HandleFunc("/count", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "%d", b.Len())
+	r.HandleFunc("/count", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]int{"count": b.Len()}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	})
 
-	http.HandleFunc("/item/{key}", func(w http.ResponseWriter, r *http.Request) {
-		key := r.URL.Query().Get("key")
+	r.HandleFunc("/item/{key}", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		key := vars["key"]
+
 		val, err := b.Get(key)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		if err = json.NewEncoder(w).Encode(val); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	})
 
-	if err := http.ListenAndServe(port, nil); err != nil {
+	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		//print persistent info like number of keys, etc
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]int{"Number of keys": b.Len()}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	log.Infof("Starting server on port %s", port)
+
+	if err := http.ListenAndServe(port, r); err != nil {
 		log.Errorf("failed to start web interface: %s", err)
 	}
 }
