@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/oklog/ulid/v2"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -236,6 +238,15 @@ func (b *BadgerPersistence) Delete(key string) error {
 	return nil
 }
 
+// DeleteAll deletes all keyList in the key-value store.
+func (b *BadgerPersistence) DeleteAll() error {
+	if err := b.db.DropAll(); err != nil {
+		return fmt.Errorf("failed to delete all keys: %w", err)
+	}
+	b.keyList = make(map[string][]byte)
+	return nil
+}
+
 // Close closes the database and frees up any resources.
 func (b *BadgerPersistence) Close() error {
 	return b.db.Close()
@@ -250,4 +261,53 @@ func (b *BadgerPersistence) ListKeys() (map[string][]byte, error) {
 func (b *BadgerPersistence) Len() int {
 	l := len(b.keyList)
 	return l + 1
+}
+
+// StartWebInterface starts a web interface.
+func (b *BadgerPersistence) StartWebInterface(port string) {
+	http.HandleFunc("/items", func(w http.ResponseWriter, r *http.Request) {
+		keys, err := b.ListKeys()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		items := make(map[string]*Value, len(keys))
+		for key := range keys {
+			val, err := b.Get(key)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			items[key] = val
+		}
+
+		if err = json.NewEncoder(w).Encode(items); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+
+	http.HandleFunc("/count", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%d", b.Len())
+	})
+
+	http.HandleFunc("/item/{key}", func(w http.ResponseWriter, r *http.Request) {
+		key := r.URL.Query().Get("key")
+		val, err := b.Get(key)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if err = json.NewEncoder(w).Encode(val); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+
+	if err := http.ListenAndServe(port, nil); err != nil {
+		log.Errorf("failed to start web interface: %s", err)
+	}
 }
