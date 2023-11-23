@@ -1,16 +1,15 @@
 package persistence
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
-	"encoding/json"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dyammarcano/base58"
-	"github.com/gorilla/mux"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +22,6 @@ var (
 type (
 	Callback func(key string, err error)
 
-	// CachePersistence is a wrapper around BadgerDB.
 	CachePersistence struct {
 		db       *badger.DB
 		keyList  map[string][]byte
@@ -35,17 +33,8 @@ type (
 	}
 
 	Key struct {
-		String   string
-		Key      []byte
-		Hits     int
-		CreateAt int64
-		UpdateAt int64
-	}
-
-	Value struct {
-		CreateAt int64
-		UpdateAt int64
-		Payload  []byte
+		String string
+		Key    []byte
 	}
 )
 
@@ -129,9 +118,8 @@ func (b *CachePersistence) composeKey(key []byte) *Key {
 	defer b.mutex.Unlock()
 
 	return &Key{
-		Key:      key,
-		String:   b.encodeKey(key),
-		CreateAt: time.Now().UnixNano(),
+		Key:    key,
+		String: b.encodeKey(key),
 	}
 }
 
@@ -149,92 +137,21 @@ func (b *CachePersistence) encodeKey(key []byte) string {
 	return strings.ToUpper(base58.StdEncoding.EncodeToString(sha1.New().Sum(key)))[0:27]
 }
 
-// serialize serializes a value.
-func (b *CachePersistence) serialize(value any) ([]byte, error) {
-	return json.Marshal(value)
+// Serialize serializes a value.
+func (b *CachePersistence) Serialize(value any) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(value); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
-// deserialize deserializes a value.
-func (b *CachePersistence) deserialize(obj *Value, val []byte) error {
-	if err := json.Unmarshal(val, &obj); err != nil {
+// Deserialize deserializes a value.
+func (b *CachePersistence) Deserialize(obj any, val []byte) error {
+	if err := gob.NewDecoder(bytes.NewReader(val)).Decode(obj); err != nil {
 		return err
 	}
 	return nil
-}
-
-// GetValue returns the value for the given key.
-func (b *CachePersistence) GetValue(key string) (*Value, error) {
-	ks, err := b.getKeyFromKeyList(key)
-	if err != nil {
-		return nil, err
-	}
-
-	valObj := &Value{}
-	if err = b.db.View(func(txn *badger.Txn) error {
-		item, _ := txn.Get(ks)
-		val, err := item.ValueCopy(nil)
-		if err != nil {
-			return err
-		}
-
-		if err = b.deserialize(valObj, val); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return valObj, err
-}
-
-// SetValue sets the value for the given key.
-func (b *CachePersistence) SetValue(value []byte) (string, error) {
-	vk := b.generateRandomKey()
-	return b.SetValueWithKey(vk, value)
-}
-
-// SetValueWithKey sets the value for the given key.
-func (b *CachePersistence) SetValueWithKey(key, value []byte) (string, error) {
-	ks := b.composeKey(key)
-
-	val, err := b.serialize(Value{
-		CreateAt: ks.CreateAt,
-		Payload:  value,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	if err = b.db.Update(func(txn *badger.Txn) error {
-		return txn.SetEntry(badger.NewEntry(ks.Key, val).WithTTL(b.expires).WithMeta(byte(1)))
-	}); err != nil {
-		return "", err
-	}
-	b.addKeyCh <- ks.Key
-	return ks.String, nil
-}
-
-// SetStruct sets the value for the given key.
-func (b *CachePersistence) SetStruct(value any) (string, error) {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return "", err
-	}
-	return b.SetValue(data)
-}
-
-// SetStructAsync sets the value for the given key asynchronously.
-func (b *CachePersistence) SetStructAsync(value any, fn Callback) {
-	go fn(b.SetStruct(value))
-}
-
-// GetStruct returns the value for the given key.
-func (b *CachePersistence) GetStruct(key string, value any) error {
-	val, err := b.GetValue(key)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(val.Payload, &value)
 }
 
 // Delete deletes the value for the given key.
@@ -269,8 +186,8 @@ func (b *CachePersistence) Close() error {
 }
 
 // ListKeys returns a list of all keyList in the key-value store.
-func (b *CachePersistence) ListKeys() (map[string][]byte, error) {
-	return b.keyList, nil
+func (b *CachePersistence) ListKeys() map[string][]byte {
+	return b.keyList
 }
 
 // Len returns the number of keyList in the key-value store.
@@ -279,62 +196,66 @@ func (b *CachePersistence) Len() int {
 	return l + 1
 }
 
-// RegisterPersistenceWebInterface starts a web interface.
-func (b *CachePersistence) RegisterPersistenceWebInterface(router *mux.Router) {
-	router.HandleFunc("/items", func(w http.ResponseWriter, r *http.Request) {
-		keys, err := b.ListKeys()
+// SetValue sets the value for the given key.
+func (b *CachePersistence) SetValue(value []byte) (string, error) {
+	vk := b.generateRandomKey()
+	return b.SetValueWithKey(vk, value)
+}
+
+// SetValueWithKey sets the value for the given key.
+func (b *CachePersistence) SetValueWithKey(key, value []byte) (string, error) {
+	ks := b.composeKey(key)
+
+	if err := b.db.Update(func(txn *badger.Txn) error {
+		return txn.SetEntry(badger.NewEntry(ks.Key, value).WithTTL(b.expires).WithMeta(byte(1)))
+	}); err != nil {
+		return "", err
+	}
+	b.addKeyCh <- ks.Key
+	return ks.String, nil
+}
+
+// SetStruct sets the value for the given key.
+func (b *CachePersistence) SetStruct(value any) (string, error) {
+	data, err := b.Serialize(value)
+	if err != nil {
+		return "", err
+	}
+	return b.SetValue(data)
+}
+
+// SetStructAsync sets the value for the given key asynchronously.
+func (b *CachePersistence) SetStructAsync(value any, fn Callback) {
+	go fn(b.SetStruct(value))
+}
+
+// GetValue returns the value for the given key.
+func (b *CachePersistence) GetValue(key string) ([]byte, error) {
+	ks, err := b.getKeyFromKeyList(key)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []byte
+	if err = b.db.View(func(txn *badger.Txn) error {
+		item, _ := txn.Get(ks)
+		val, err := item.ValueCopy(nil)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			return err
 		}
+		result = val
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return result, err
+}
 
-		items := make(map[string]*Value, len(keys))
-		for key := range keys {
-			val, err := b.GetValue(key)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			items[key] = val
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err = json.NewEncoder(w).Encode(items); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	})
-
-	router.HandleFunc("/count", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]int{"count": b.Len()}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-	})
-
-	router.HandleFunc("/item/{key}", func(w http.ResponseWriter, r *http.Request) {
-		vars := mux.Vars(r)
-		key := vars["key"]
-
-		val, err := b.GetValue(key)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err = json.NewEncoder(w).Encode(val); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	})
-
-	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		//print persistent info like number of keys, etc
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]int{"Number of keys": b.Len()}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-	})
+// GetStruct returns the value for the given key.
+func (b *CachePersistence) GetStruct(key string, value any) error {
+	data, err := b.GetValue(key)
+	if err != nil {
+		return err
+	}
+	return b.Deserialize(value, data)
 }

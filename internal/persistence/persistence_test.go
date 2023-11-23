@@ -7,7 +7,6 @@ import (
 	v1 "documentDatabaseTest/internal/models/v1"
 	"fmt"
 	"github.com/stretchr/testify/assert"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -18,34 +17,18 @@ var (
 	value       = []byte("hello world from go guys!")
 )
 
-func measureTime(fn func()) {
-	start := time.Now()
-	fn()
-	fmt.Printf("time: %s\n", time.Since(start))
-}
-
-func TestMain(m *testing.M) {
+func init() {
 	path := filepath.Clean("../../test.db")
 	var err error
 	persistence, err = NewBadgerPersistence(context.TODO(), path)
 	if err != nil {
 		panic(err)
 	}
-
-	code := m.Run()
-	persistence.Close()
-	//err = os.RemoveAll(path)
-	//if err != nil {
-	//	panic(err)
-	//}
-	os.Exit(code)
 }
 
 func TestBadgerPersistence_GetStruct(t *testing.T) {
 	msgObj := &v1.OperationStatus{
 		RuntimeVersion: "1.0.0",
-		CreateAt:       1700626863623721700,
-		UpdateAt:       1700626863623721700,
 		ID:             "831e1650-001e-001b-66ab-eeb76e069631",
 		OperationID:    "e8e564fd-38f5-4684-9581-c30f6c25213a",
 		Status:         "Failed",
@@ -57,7 +40,7 @@ func TestBadgerPersistence_GetStruct(t *testing.T) {
 			Hash:          "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
 		},
 		Stages: &v1.Stages{
-			Stage0: &v1.Stage{
+			Stage1: &v1.Stage{
 				StartTime: "2017-06-26T18:41:00.9584103Z",
 				EndTime:   "2017-06-26T18:41:00.9584103Z",
 				Message:   "The request is invalid.",
@@ -67,7 +50,17 @@ func TestBadgerPersistence_GetStruct(t *testing.T) {
 					Message: "File not meet the requirements.",
 				},
 			},
-			Stage1: &v1.Stage{
+			Stage2: &v1.Stage{
+				StartTime: "2017-06-26T18:41:00.9584103Z",
+				EndTime:   "2017-06-26T18:41:00.9584103Z",
+				Message:   "The request is invalid.",
+				InnerError: &v1.InnerError{
+					Date:    "2017-06-26T18:41:00",
+					Code:    "InvalidRequest",
+					Message: "File not meet the requirements.",
+				},
+			},
+			Stage3: &v1.Stage{
 				StartTime: "2017-06-26T18:41:00.9584103Z",
 				EndTime:   "2017-06-26T18:41:00.9584103Z",
 				Message:   "The request is invalid.",
@@ -80,15 +73,11 @@ func TestBadgerPersistence_GetStruct(t *testing.T) {
 		},
 	}
 
-	start := time.Now()
 	key, err := persistence.SetStruct(msgObj)
-	fmt.Printf("SetStruct time: %s\n", time.Since(start))
 	assert.NoErrorf(t, err, "expected error, but got '%s'", err)
 
 	got := &v1.OperationStatus{}
-	start2 := time.Now()
 	err = persistence.GetStruct(key, got)
-	fmt.Printf("GetStruct time: %s\n", time.Since(start2))
 	assert.NoErrorf(t, err, "expected error, but got '%s'", err)
 
 	assert.Equalf(t, msgObj.FileInfo.ETag, got.FileInfo.ETag, "expected '%s', but got '%s'", msgObj.FileInfo.ETag, got.FileInfo.ETag)
@@ -98,8 +87,6 @@ func TestBadgerPersistence_GetStruct(t *testing.T) {
 func TestBadgerPersistence_SetStructAsync(t *testing.T) {
 	msgObj := &v1.OperationStatus{
 		RuntimeVersion: "1.0.0",
-		CreateAt:       1700626863623721700,
-		UpdateAt:       1700626863623721700,
 		ID:             "831e1650-001e-001b-66ab-eeb76e069631",
 		OperationID:    "e8e564fd-38f5-4684-9581-c30f6c25213a",
 		Status:         "Failed",
@@ -111,7 +98,7 @@ func TestBadgerPersistence_SetStructAsync(t *testing.T) {
 			Hash:          "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
 		},
 		Stages: &v1.Stages{
-			Stage0: &v1.Stage{
+			Stage1: &v1.Stage{
 				StartTime: "2017-06-26T18:41:00.9584103Z",
 				EndTime:   "2017-06-26T18:41:00.9584103Z",
 				Message:   "The request is invalid.",
@@ -121,7 +108,17 @@ func TestBadgerPersistence_SetStructAsync(t *testing.T) {
 					Message: "File not meet the requirements.",
 				},
 			},
-			Stage1: &v1.Stage{
+			Stage2: &v1.Stage{
+				StartTime: "2017-06-26T18:41:00.9584103Z",
+				EndTime:   "2017-06-26T18:41:00.9584103Z",
+				Message:   "The request is invalid.",
+				InnerError: &v1.InnerError{
+					Date:    "2017-06-26T18:41:00",
+					Code:    "InvalidRequest",
+					Message: "File not meet the requirements.",
+				},
+			},
+			Stage3: &v1.Stage{
 				StartTime: "2017-06-26T18:41:00.9584103Z",
 				EndTime:   "2017-06-26T18:41:00.9584103Z",
 				Message:   "The request is invalid.",
@@ -159,9 +156,9 @@ func TestBadgerPersistence_Get(t *testing.T) {
 
 	got, err := persistence.GetValue(key)
 	assert.NoErrorf(t, err, "expected error, but got '%s'", err)
-	assert.Equalf(t, value, got.Payload, "expected '%s', but got '%s'", string(value), string(got.Payload))
+	assert.Equalf(t, value, got, "expected '%s', but got '%s'", string(value), string(got))
 
-	fmt.Printf("key: %s, value: %s\n", key, got.Payload)
+	fmt.Printf("key: %s, value: %s\n", key, got)
 }
 
 func TestBadgerPersistence_ListKeys(t *testing.T) {

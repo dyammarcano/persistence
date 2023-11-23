@@ -12,8 +12,6 @@ const (
 type (
 	ProcessString   string
 	OperationStatus struct {
-		CreateAt       int64     `json:"createAt,omitempty"`
-		UpdateAt       int64     `json:"updateAt,omitempty"`
 		ID             string    `json:"id,omitempty"`
 		OperationID    string    `json:"operationId,omitempty"`
 		RuntimeVersion string    `json:"runtimeVersion,omitempty"`
@@ -33,14 +31,10 @@ type (
 	Stages struct {
 		SolicitationNumber int    `json:"solicitaionNumber,omitempty"`
 		Completed          string `json:"completed,omitempty"`
-		Stage0             *Stage `json:"stage0,omitempty"`
 		Stage1             *Stage `json:"stage1,omitempty"`
 		Stage2             *Stage `json:"stage2,omitempty"`
 		Stage3             *Stage `json:"stage3,omitempty"`
 		Stage4             *Stage `json:"stage4,omitempty"`
-		Stage5             *Stage `json:"stage5,omitempty"`
-		Stage6             *Stage `json:"stage6,omitempty"`
-		Stage7             *Stage `json:"stage7,omitempty"`
 	}
 
 	Stage struct {
@@ -67,6 +61,15 @@ func (o *OperationStatus) Serialize() (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// SerializeBytes serializes the OperationStatus object into a JSON byte array.
+func (o *OperationStatus) SerializeBytes() ([]byte, error) {
+	data, err := json.Marshal(o)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 // Deserialize deserializes the JSON string into the OperationStatus object.
