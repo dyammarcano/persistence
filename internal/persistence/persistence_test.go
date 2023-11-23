@@ -162,8 +162,7 @@ func TestBadgerPersistence_Get(t *testing.T) {
 }
 
 func TestBadgerPersistence_ListKeys(t *testing.T) {
-	keys, err := persistence.ListKeys()
-	assert.NoErrorf(t, err, "expected error, but got '%s'", err)
+	keys := persistence.ListKeys()
 	assert.NotNilf(t, keys, "expected keys, but got '%s'", keys)
 }
 

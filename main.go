@@ -95,8 +95,6 @@ func main() {
 		}
 	}()
 
-	persistent.RegisterPersistenceWebInterface(router)
-
 	log.Infof("Start web server")
 
 	if err := http.ListenAndServe(":8080", router); err != nil {
