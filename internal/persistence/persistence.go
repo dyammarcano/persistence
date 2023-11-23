@@ -15,8 +15,16 @@ import (
 	"time"
 )
 
+const (
+	BDGDATPREFIX = "dat:"
+	BDGLOGPREFIX = "log:"
+)
+
 var (
 	ErrKeyNotFound = errors.New("key not found")
+
+	dbDatPrefix = []byte(BDGDATPREFIX)
+	dbLogPrefix = []byte(BDGLOGPREFIX)
 )
 
 type (
@@ -27,9 +35,9 @@ type (
 		keyList  map[string][]byte
 		addKeyCh chan []byte
 		mutex    *sync.Mutex
-		wg       sync.WaitGroup
 		ctx      context.Context
 		expires  time.Duration
+		logIdx   uint64
 	}
 
 	Key struct {
@@ -52,7 +60,6 @@ func NewBadgerPersistenceWithInMemory(ctx context.Context) (*CachePersistence, e
 		keyList:  make(map[string][]byte),
 		addKeyCh: make(chan []byte, 10),
 		mutex:    &sync.Mutex{},
-		wg:       sync.WaitGroup{},
 		ctx:      ctx,
 		expires:  36 * time.Hour,
 	}
@@ -77,7 +84,6 @@ func NewBadgerPersistence(ctx context.Context, path string) (*CachePersistence, 
 		keyList:  make(map[string][]byte),
 		addKeyCh: make(chan []byte, 10),
 		mutex:    &sync.Mutex{},
-		wg:       sync.WaitGroup{},
 		ctx:      ctx,
 		expires:  36 * time.Hour,
 	}
@@ -92,9 +98,6 @@ func NewBadgerPersistence(ctx context.Context, path string) (*CachePersistence, 
 
 // keysMonitor monitors the addKeyCh channel.
 func (b *CachePersistence) keysMonitor() {
-	b.wg.Add(1)
-	defer b.wg.Done()
-
 	for {
 		select {
 		case key := <-b.addKeyCh:
@@ -114,7 +117,7 @@ func (b *CachePersistence) loadKeys() error {
 	err := b.db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
 
-		for it.Rewind(); it.Valid(); it.Next() {
+		for it.Rewind(); it.ValidForPrefix(dbDatPrefix); it.Next() {
 			item := it.Item()
 			// check if key is expired or deleted
 			if item.IsDeletedOrExpired() {
@@ -158,13 +161,13 @@ func (b *CachePersistence) composeKey(key []byte) *Key {
 	}
 }
 
-// generateRandomKey generate random key with fix length of 10 bits
+// generateRandomKey generate random key with fix length of 10 bits + prefix.
 func (b *CachePersistence) generateRandomKey() []byte {
 	var vk = make([]byte, 10)
 	if _, err := rand.Read(vk); err != nil {
 		return nil
 	}
-	return vk
+	return dataKey(vk)
 }
 
 // encodeKey encodes a key and return a string with 27 characters.
@@ -293,4 +296,40 @@ func (b *CachePersistence) GetStruct(key string, value any) error {
 		return err
 	}
 	return b.Deserialize(value, data)
+}
+
+func (b *CachePersistence) PutLogEntry(idxKey uint64, value []byte) error {
+	if err := b.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(logKey(idxKey), value)
+	}); err != nil {
+		return err
+	}
+	b.logIdx = idxKey
+	return nil
+}
+
+func (b *CachePersistence) GetLogEntry(idxKey uint64) ([]byte, error) {
+	var result []byte
+	if err := b.db.View(func(txn *badger.Txn) error {
+		item, _ := txn.Get(logKey(idxKey))
+		val, err := item.ValueCopy(nil)
+		if err != nil {
+			return err
+		}
+		result = val
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func logKey(idxKey uint64) []byte {
+	v := fmt.Sprintf("%s%d", dbLogPrefix, idxKey)
+	return []byte(v)
+}
+
+func dataKey(rawKey []byte) []byte {
+	v := fmt.Sprintf("%s%s", dbDatPrefix, rawKey)
+	return []byte(v)
 }
