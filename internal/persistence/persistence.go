@@ -27,7 +27,6 @@ type (
 		keyList  map[string][]byte
 		addKeyCh chan []byte
 		mutex    *sync.Mutex
-		wg       sync.WaitGroup
 		ctx      context.Context
 		expires  time.Duration
 	}
@@ -52,7 +51,6 @@ func NewBadgerPersistenceWithInMemory(ctx context.Context) (*CachePersistence, e
 		keyList:  make(map[string][]byte),
 		addKeyCh: make(chan []byte, 10),
 		mutex:    &sync.Mutex{},
-		wg:       sync.WaitGroup{},
 		ctx:      ctx,
 		expires:  36 * time.Hour,
 	}
@@ -77,7 +75,6 @@ func NewBadgerPersistence(ctx context.Context, path string) (*CachePersistence, 
 		keyList:  make(map[string][]byte),
 		addKeyCh: make(chan []byte, 10),
 		mutex:    &sync.Mutex{},
-		wg:       sync.WaitGroup{},
 		ctx:      ctx,
 		expires:  36 * time.Hour,
 	}
@@ -92,9 +89,6 @@ func NewBadgerPersistence(ctx context.Context, path string) (*CachePersistence, 
 
 // keysMonitor monitors the addKeyCh channel.
 func (b *CachePersistence) keysMonitor() {
-	b.wg.Add(1)
-	defer b.wg.Done()
-
 	for {
 		select {
 		case key := <-b.addKeyCh:
