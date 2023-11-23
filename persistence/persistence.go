@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/dgraph-io/badger/v4"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -14,8 +15,9 @@ var (
 )
 
 type (
-	Callback    func(key string, err error)
-	processItem func(item *badger.Item) error
+	Callback      func(key string, err error)
+	processItem   func(item *badger.Item) error
+	performAction func(txn *badger.Txn) error
 
 	Store struct {
 		db       *badger.DB
@@ -32,9 +34,12 @@ type (
 	}
 )
 
-// NewBadgerPersistenceWithInMemory returns a new PersistenceStore with in-memory database.
-func NewBadgerPersistenceWithInMemory(ctx context.Context) (*Store, error) {
-	opts := badger.DefaultOptions("").WithInMemory(true)
+// NewBadgerPersistence returns a new PersistenceStore.
+func NewBadgerPersistence(ctx context.Context, memory bool, path string) (*Store, error) {
+	opts := badger.DefaultOptions(path)
+	if memory {
+		opts = badger.DefaultOptions("").WithInMemory(true)
+	}
 
 	db, err := badger.Open(opts)
 	if err != nil {
@@ -54,34 +59,13 @@ func NewBadgerPersistenceWithInMemory(ctx context.Context) (*Store, error) {
 	if err = b.loadKeys(); err != nil {
 		return nil, err
 	}
-	return b, nil
-}
 
-// NewBadgerPersistence returns a new PersistenceStore.
-func NewBadgerPersistence(ctx context.Context, path string) (*Store, error) {
-	db, err := badger.Open(badger.DefaultOptions(path))
-	if err != nil {
-		return nil, err
-	}
-
-	b := &Store{
-		db:       db,
-		keyList:  make(map[string][]byte),
-		addKeyCh: make(chan []byte, 10),
-		ctx:      ctx,
-		expires:  36 * time.Hour,
-	}
-
-	go b.keysMonitor()
-
-	if err = b.loadKeys(); err != nil {
-		return nil, err
-	}
 	return b, nil
 }
 
 // keysMonitor monitors the addKeyCh channel.
 func (s *Store) keysMonitor() {
+	slog.Info("keysMonitor")
 	for {
 		select {
 		case key := <-s.addKeyCh:
@@ -98,9 +82,8 @@ func (s *Store) keysMonitor() {
 
 // loadKeys loads all keys from the database.
 func (s *Store) loadKeys() error {
-	err := s.db.View(func(txn *badger.Txn) error {
+	callback := func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
-
 		for it.Rewind(); it.ValidForPrefix(dbDatPrefix); it.Next() {
 			item := it.Item()
 			// check if key is expired or deleted
@@ -111,8 +94,12 @@ func (s *Store) loadKeys() error {
 		}
 		it.Close()
 		return nil
-	})
-	return err
+	}
+
+	if err := s.badgerInteract("loadKeys", callback, true, false); err != nil {
+		return err
+	}
+	return nil
 }
 
 // iterateDB iterates over all keyList in the key-value store.
@@ -157,18 +144,21 @@ func (s *Store) Delete(key string) error {
 		return err
 	}
 
-	if err = s.db.Update(func(txn *badger.Txn) error {
+	callback := func(txn *badger.Txn) error {
 		err := txn.Delete(ks)
 		return err
-	}); err != nil {
+	}
+
+	if err = s.badgerInteract("Delete", callback, false, true); err != nil {
 		return err
 	}
 	delete(s.keyList, key)
 	return nil
 }
 
-// DeleteAll deletes all keyList in the key-value store.
-func (s *Store) DeleteAll() error {
+// DropAll deletes all keyList in the key-value store.
+func (s *Store) DropAll() error {
+	slog.Info(fmt.Sprintf("DropAll, keyList: %d", len(s.keyList)))
 	if err := s.db.DropAll(); err != nil {
 		return fmt.Errorf("failed to delete all keys: %w", err)
 	}
@@ -205,15 +195,22 @@ func (s *Store) SetValue(value []byte) (string, error) {
 
 // SetValueWithKey sets the value for the given key.
 func (s *Store) SetValueWithKey(key, value []byte) (string, error) {
-	ks := composeKey(key)
+	var keyStr string
+	callback := func(txn *badger.Txn) error {
+		ks := composeKey(key)
+		err := txn.SetEntry(badger.NewEntry(ks.Key, value).WithTTL(s.expires).WithMeta(byte(1)))
+		if err != nil {
+			return err
+		}
+		s.addKeyCh <- ks.Key
+		keyStr = ks.String
+		return nil
+	}
 
-	if err := s.db.Update(func(txn *badger.Txn) error {
-		return txn.SetEntry(badger.NewEntry(ks.Key, value).WithTTL(s.expires).WithMeta(byte(1)))
-	}); err != nil {
+	if err := s.badgerInteract("SetValueWithKey", callback, false, true); err != nil {
 		return "", err
 	}
-	s.addKeyCh <- ks.Key
-	return ks.String, nil
+	return keyStr, nil
 }
 
 // SetStruct sets the value for the given key.
@@ -225,11 +222,6 @@ func (s *Store) SetStruct(value any) (string, error) {
 	return s.SetValue(data)
 }
 
-// SetStructAsync sets the value for the given key asynchronously.
-func (s *Store) SetStructAsync(value any, fn Callback) {
-	go fn(s.SetStruct(value))
-}
-
 // GetValue returns the value for the given key.
 func (s *Store) GetValue(key string) ([]byte, error) {
 	ks, err := s.getKeyFromKeyList(key)
@@ -238,18 +230,31 @@ func (s *Store) GetValue(key string) ([]byte, error) {
 	}
 
 	var result []byte
-	if err = s.db.View(func(txn *badger.Txn) error {
-		item, _ := txn.Get(ks)
+	callback := func(txn *badger.Txn) error {
+		item, err := txn.Get(ks)
+		if err != nil {
+			return err
+		}
 		val, err := item.ValueCopy(nil)
 		if err != nil {
 			return err
 		}
 		result = val
 		return nil
-	}); err != nil {
+	}
+
+	if err = s.badgerInteract("GetValue", callback, true, false); err != nil {
 		return nil, err
 	}
 	return result, err
+}
+
+// badgerInteract interacts with the badger database.
+func (s *Store) badgerInteract(caller string, callback performAction, read, write bool) error {
+	slog.Info(fmt.Sprintf("badgerInteract, [%s]", caller))
+	return s.db.Update(func(txn *badger.Txn) error {
+		return callback(txn)
+	})
 }
 
 // GetStruct returns the value for the given key.
@@ -263,11 +268,14 @@ func (s *Store) GetStruct(key string, value any) error {
 
 // PutLogEntry put log entry
 func (s *Store) PutLogEntry(idxKey uint64, value []byte) error {
-	if err := s.db.Update(func(txn *badger.Txn) error {
+	callback := func(txn *badger.Txn) error {
 		return txn.Set(logKey(idxKey), value)
-	}); err != nil {
+	}
+
+	if err := s.badgerInteract("PutLogEntry", callback, false, true); err != nil {
 		return err
 	}
+
 	s.logIdx = idxKey
 	return nil
 }
@@ -275,7 +283,7 @@ func (s *Store) PutLogEntry(idxKey uint64, value []byte) error {
 // GetLogEntry get log entry
 func (s *Store) GetLogEntry(idxKey uint64) ([]byte, error) {
 	var result []byte
-	if err := s.db.View(func(txn *badger.Txn) error {
+	callback := func(txn *badger.Txn) error {
 		item, _ := txn.Get(logKey(idxKey))
 		val, err := item.ValueCopy(nil)
 		if err != nil {
@@ -283,7 +291,9 @@ func (s *Store) GetLogEntry(idxKey uint64) ([]byte, error) {
 		}
 		result = val
 		return nil
-	}); err != nil {
+	}
+
+	if err := s.badgerInteract("GetLogEntry", callback, true, false); err != nil {
 		return nil, err
 	}
 	return result, nil
