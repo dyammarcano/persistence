@@ -13,7 +13,7 @@ func GetData() []string {
 
 	var paragraphs []string
 
-	// Set up a callback to be called for each HTML element with the "p" tag
+	// SetValue up a callback to be called for each HTML element with the "p" tag
 	c.OnHTML("p", func(e *colly.HTMLElement) {
 		// Extract and print the text content of the paragraph
 		paragraphText := strings.TrimSpace(e.Text)
@@ -22,7 +22,7 @@ func GetData() []string {
 		}
 	})
 
-	// Set up error handling
+	// SetValue up error handling
 	c.OnError(func(r *colly.Response, err error) {
 		log.Println("Request URL:", r.Request.URL, "failed with response:", r, "\nError:", err)
 	})
