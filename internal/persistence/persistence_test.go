@@ -7,7 +7,6 @@ import (
 	v1 "documentDatabaseTest/internal/models/v1"
 	"fmt"
 	"github.com/stretchr/testify/assert"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -18,9 +17,8 @@ var (
 )
 
 func init() {
-	path := filepath.Clean("../../test.db")
 	var err error
-	persistence, err = NewBadgerPersistence(context.TODO(), path)
+	persistence, err = NewBadgerPersistenceWithInMemory(context.TODO())
 	if err != nil {
 		panic(err)
 	}
