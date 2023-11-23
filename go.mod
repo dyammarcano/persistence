@@ -1,4 +1,4 @@
-module documentDatabaseTest
+module github.com/dyammarcano/persistence
 
 go 1.21
 
