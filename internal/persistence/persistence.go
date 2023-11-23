@@ -38,6 +38,33 @@ type (
 	}
 )
 
+// NewBadgerPersistenceWithInMemory returns a new CachePersistence with in-memory database.
+func NewBadgerPersistenceWithInMemory(ctx context.Context) (*CachePersistence, error) {
+	opts := badger.DefaultOptions("").WithInMemory(true)
+
+	db, err := badger.Open(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	b := &CachePersistence{
+		db:       db,
+		keyList:  make(map[string][]byte),
+		addKeyCh: make(chan []byte, 10),
+		mutex:    &sync.Mutex{},
+		wg:       sync.WaitGroup{},
+		ctx:      ctx,
+		expires:  36 * time.Hour,
+	}
+
+	go b.keysMonitor()
+
+	if err = b.loadKeys(); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
 // NewBadgerPersistence returns a new CachePersistence.
 func NewBadgerPersistence(ctx context.Context, path string) (*CachePersistence, error) {
 	db, err := badger.Open(badger.DefaultOptions(path))
@@ -71,6 +98,10 @@ func (b *CachePersistence) keysMonitor() {
 	for {
 		select {
 		case key := <-b.addKeyCh:
+			// check if key already exists
+			if _, ok := b.keyList[b.encodeKey(key)]; ok {
+				continue
+			}
 			b.addKeyToKeyList(key)
 		case <-b.ctx.Done():
 			return
@@ -85,6 +116,10 @@ func (b *CachePersistence) loadKeys() error {
 
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
+			// check if key is expired or deleted
+			if item.IsDeletedOrExpired() {
+				continue
+			}
 			b.addKeyCh <- item.KeyCopy(nil)
 		}
 		it.Close()
