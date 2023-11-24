@@ -251,10 +251,21 @@ func (s *Store) GetValue(key string) ([]byte, error) {
 
 // badgerInteract interacts with the badger database.
 func (s *Store) badgerInteract(caller string, callback performAction, read, write bool) error {
-	slog.Info(fmt.Sprintf("badgerInteract, [%s]", caller))
-	return s.db.Update(func(txn *badger.Txn) error {
-		return callback(txn)
-	})
+	if write {
+		log.Infof("badgerInteract, write [%s]", caller)
+		return s.db.Update(func(txn *badger.Txn) error {
+			return callback(txn)
+		})
+	}
+
+	if read {
+		log.Infof("badgerInteract, read [%s]", caller)
+		return s.db.View(func(txn *badger.Txn) error {
+			return callback(txn)
+		})
+	}
+
+	return nil
 }
 
 // GetStruct returns the value for the given key.
